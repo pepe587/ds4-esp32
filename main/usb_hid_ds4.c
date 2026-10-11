@@ -166,9 +166,7 @@ const uint8_t hid_report_descriptor[] = {
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// STRING DESCRIPTORS — usamos los de GP2040-CE (Razer Panthera licenciado)
-// VID/PID 0x1532/0x0401 (Razer Panthera) → la PS5 lo trata como mando
-// licenciado oficialmente y no exige firma RSA estricta como con DS4 real.
+// STRING DESCRIPTORS — HORI Fighting Commander OCTA en modo PS4.
 // ════════════════════════════════════════════════════════════════════════════
 const char *hid_string_descriptor[] = {
     (char[]){0x09, 0x04},                       // 0: lang English
@@ -199,11 +197,11 @@ static const tusb_desc_device_t ds4_device_descriptor = {
     .bDeviceProtocol    = 0x00,
     .bMaxPacketSize0    = 64,
     .idVendor           = 0x0F0D,   // HORI
-    .idProduct          = 0x0163,   // Fighting Commander OCTA (modo PS5)
+    .idProduct          = 0x0162,   // Fighting Commander OCTA (modo PS4)
     .bcdDevice          = 0x0100,
     .iManufacturer      = 0x01,
     .iProduct           = 0x02,
-    .iSerialNumber      = 0x00,     // sin serial → como Razer Panthera real
+    .iSerialNumber      = 0x00,
     .bNumConfigurations = 0x01,
 };
 
@@ -264,6 +262,9 @@ static const uint8_t out_0xA3[] = {
     0x07, 0xA0, 0x10, 0x20, 0x00, 0xA0, 0x02, 0x00,
 };
 
+// PS4 auth reset: nonce page size and response page size are both 56 bytes.
+static const uint8_t out_0xF3[] = {0x00, 0x38, 0x38, 0x00, 0x00, 0x00, 0x00};
+
 // ════════════════════════════════════════════════════════════════════════════
 // CALLBACKS TINYUSB
 // ════════════════════════════════════════════════════════════════════════════
@@ -315,6 +316,14 @@ uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
             memcpy(buffer, out_0xA3, n);
             return n;
         }
+        case 0xF3: {  // RESET_AUTH
+            uint16_t n = reqlen < sizeof(out_0xF3) ? reqlen : sizeof(out_0xF3);
+            memcpy(buffer, out_0xF3, n);
+            auth_nonce_received = false;
+            auth_nonce_id = 0;
+            ESP_LOGI(TAG, "STUB: F3 auth reset respondido (%u bytes)", n);
+            return n;
+        }
         case 0xF1: {  // AUTH SIGNATURE RESPONSE (stub: ceros)
             memset(buffer, 0, reqlen);
             buffer[0] = auth_nonce_id;
@@ -350,7 +359,7 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
 }
 
 void usb_hid_ds4_init(void) {
-    ESP_LOGI(TAG, "Iniciando USB HID (Razer Panthera PID 0x0401)");
+    ESP_LOGI(TAG, "Iniciando USB HID (HORI OCTA PS4 PID 0x0162)");
 
     tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
     tusb_cfg.descriptor.device            = &ds4_device_descriptor;
@@ -359,11 +368,11 @@ void usb_hid_ds4_init(void) {
     tusb_cfg.descriptor.string_count      = sizeof(hid_string_descriptor) / sizeof(hid_string_descriptor[0]);
 
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
-    ESP_LOGI(TAG, "USB HID listo — la PS5 ahora debería pedir 0x02/0x03/0x12/0xA3");
+    ESP_LOGI(TAG, "USB HID listo");
 }
 
-void ds4_send_report(const ds4_action_t *action) {
-    if (!tud_hid_ready()) return;
+bool ds4_send_report(const ds4_action_t *action) {
+    if (!tud_hid_ready()) return false;
 
     ds4_report_t report = {0};
     report.report_id = 0x01;
@@ -373,20 +382,13 @@ void ds4_send_report(const ds4_action_t *action) {
     report.ry = action->ry;
     report.buttons1 = (action->buttons1 & 0xF0) | (action->dpad & 0x0F);
     report.buttons2 = action->buttons2;
-    report.buttons3 = ((report_counter++ & 0x3F) << 2) | (action->buttons3 & 0x03);
+    report.buttons3 = ((report_counter & 0x3F) << 2) | (action->buttons3 & 0x03);
     report.lt = action->lt;
     report.rt = action->rt;
 
     // El report ID ya está dentro del buffer (byte 0). Pasamos 0 para que
     // TinyUSB no lo prependa otra vez (igual que hace GP2040-CE).
-    tud_hid_report(0, &report, sizeof(report));
-}
-
-void ds4_send_empty(void) {
-    ds4_action_t empty = {
-        .lx = 0x80, .ly = 0x80,
-        .rx = 0x80, .ry = 0x80,
-        .dpad = DS4_DPAD_NONE,
-    };
-    ds4_send_report(&empty);
+    if (!tud_hid_report(0, &report, sizeof(report))) return false;
+    report_counter++;
+    return true;
 }
